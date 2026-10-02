@@ -1,0 +1,9 @@
+# Never commit real credentials or the local user database
+.streamlit/secrets.toml
+users.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
