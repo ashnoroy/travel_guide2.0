@@ -223,7 +223,7 @@ if st.session_state.auth_user is None:
 
     if GOOGLE_CONFIGURED:
         if st.button("🔵 Continue with Google", use_container_width=True):
-            st.login("google")
+            st.login()
         st.divider()
         st.caption("Or use a Wanderly account:")
     else:
