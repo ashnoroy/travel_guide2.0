@@ -10,9 +10,14 @@
 
 import base64
 from pathlib import Path
+import io
+from datetime import datetime
+from urllib.parse import quote
 
 import requests
 import streamlit as st
+from docx import Document
+from fpdf import FPDF
 from langchain.agents import create_agent
 from langchain_groq import ChatGroq
 
