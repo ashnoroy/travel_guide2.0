@@ -99,6 +99,59 @@ def plan_daily_budget(total_budget: float, num_days: int, num_travelers: int = 1
 
 
 # =========================================================
+# DOCUMENT GENERATION (for the download buttons)
+# =========================================================
+ 
+def itinerary_to_docx(itinerary: dict) -> bytes:
+    doc = Document()
+    doc.add_heading(f"Travel Itinerary \u2013 {itinerary['location']}", level=1)
+    doc.add_paragraph(f"Generated on {itinerary['generated']} | {itinerary['num_days']} day(s)")
+    if itinerary.get("hotel"):
+        doc.add_paragraph(f"Suggested stay: {itinerary['hotel']}")
+    for day in itinerary["days"]:
+        doc.add_heading(f"Day {day['day']}", level=2)
+        for a in day["attractions"]:
+            doc.add_paragraph(f"Visit: {a}", style="List Bullet")
+        if day["restaurant"]:
+            doc.add_paragraph(f"Eat at: {day['restaurant']}", style="List Bullet")
+    if itinerary.get("budget_text"):
+        doc.add_heading("Budget Plan", level=2)
+        doc.add_paragraph(itinerary["budget_text"])
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+ 
+ 
+def itinerary_to_pdf(itinerary: dict) -> bytes:
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(0, 10, f"Travel Itinerary - {itinerary['location']}")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.multi_cell(0, 8, f"Generated on {itinerary['generated']} | {itinerary['num_days']} day(s)")
+    if itinerary.get("hotel"):
+        pdf.multi_cell(0, 8, f"Suggested stay: {itinerary['hotel']}")
+    for day in itinerary["days"]:
+        pdf.ln(3)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.multi_cell(0, 8, f"Day {day['day']}")
+        pdf.set_font("Helvetica", "", 11)
+        for a in day["attractions"]:
+            pdf.multi_cell(0, 7, f"- Visit {a}")
+        if day["restaurant"]:
+            pdf.multi_cell(0, 7, f"- Eat at {day['restaurant']}")
+    if itinerary.get("budget_text"):
+        pdf.ln(3)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.multi_cell(0, 8, "Budget Plan")
+        pdf.set_font("Helvetica", "", 11)
+        pdf.multi_cell(0, 7, itinerary["budget_text"])
+    return bytes(pdf.output())
+
+
+
+# =========================================================
 # STREAMLIT FRONTEND
 # =========================================================
 
