@@ -210,6 +210,13 @@ if st.session_state.auth_user is None:
     st.stop()  # don't render anything below until logged in
 
 
+# --- Google login gate (native Streamlit auth, needs secrets.toml - see README) ---
+if not st.user.is_logged_in:
+    st.info("Please log in with Google to use Wanderly.")
+    st.button("🔐 Log in with Google", on_click=st.login)
+    st.stop()
+
+
 # =========================================================
 # MAIN APP (only reached once auth_user is set)
 # =========================================================
@@ -302,3 +309,22 @@ if user_input:
         st.markdown(reply)
 
     st.session_state.messages.append(("assistant", reply))
+
+# --- Download section: appears once an itinerary has been built ---
+if st.session_state.get("last_itinerary"):
+    st.markdown("---")
+    st.subheader("📥 Download your itinerary")
+    itinerary = st.session_state["last_itinerary"]
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download as DOCX", data=itinerary_to_docx(itinerary),
+            file_name="itinerary.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    with col2:
+        st.download_button(
+            "Download as PDF", data=itinerary_to_pdf(itinerary),
+            file_name="itinerary.pdf", mime="application/pdf",
+        )
+ 
