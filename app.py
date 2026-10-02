@@ -37,9 +37,6 @@ GOOGLE_CONFIGURED = "auth" in st.secrets
 # =========================================================
 
 def search_places(location, tag, radius=3000, limit=5):
-    """Helper (not a tool): geocode a location with Nominatim, then
-    search nearby points tagged with `tag` using the Overpass API.
-    Both are free OpenStreetMap services - no API key required."""
     try:
         geo = requests.get(
             "https://nominatim.openstreetmap.org/search",
@@ -105,7 +102,7 @@ def plan_daily_budget(total_budget: float, num_days: int, num_travelers: int = 1
 # STREAMLIT FRONTEND
 # =========================================================
 
-st.set_page_config(page_title="Wanderly - Local Travel Guide Chatbot", page_icon="🧭")
+st.set_page_config(page_title="Wanderly - Local Travel Guide", page_icon="🧭")
 
 
 def set_background(image_path: str) -> None:
@@ -143,7 +140,7 @@ def set_background(image_path: str) -> None:
 set_background(str(Path(__file__).parent / "assets" / "background.jpg"))
 
 st.title("🧭 Wanderly — Local Travel Guide Chatbot")
-st.caption("Nearby attractions & restaurants · Budget planning · LangChain + Groq + OpenStreetMap")
+st.caption("Nearby attractions & restaurants · Budget planning")
 
 
 # =========================================================
@@ -219,7 +216,7 @@ if st.session_state.auth_user is None:
 
 with st.sidebar:
     st.markdown(f"👋 Logged in as **{st.session_state.auth_user}**")
-    if st.button("🚪 Log out"):
+    if st.button("➾ Log out"):
         signed_in_with_google = GOOGLE_CONFIGURED and st.user.is_logged_in
         for key in ("auth_user", "agent", "key", "messages", "chat_history"):
             st.session_state.pop(key, None)
