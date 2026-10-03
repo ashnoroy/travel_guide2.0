@@ -223,7 +223,7 @@ if st.session_state.auth_user is None:
 
     if GOOGLE_CONFIGURED:
         if st.button("🔵 Continue with Google", use_container_width=True):
-            st.login()
+            st.login("google")
         st.divider()
         st.caption("Or use a Wanderly account:")
     else:
@@ -266,13 +266,6 @@ if st.session_state.auth_user is None:
                 st.error(message)
 
     st.stop()  # don't render anything below until logged in
-
-
-# --- Google login gate (native Streamlit auth, needs secrets.toml - see README) ---
-if not st.user.is_logged_in:
-    st.info("Please log in with Google to use Wanderly.")
-    st.button("🔐 Log in with Google", on_click=st.login)
-    st.stop()
 
 
 # =========================================================
@@ -385,4 +378,3 @@ if st.session_state.get("last_itinerary"):
             "Download as PDF", data=itinerary_to_pdf(itinerary),
             file_name="itinerary.pdf", mime="application/pdf",
         )
- 
