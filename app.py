@@ -103,6 +103,85 @@ def plan_daily_budget(total_budget: float, num_days: int, num_travelers: int = 1
     )
 
 
+def _geocode(location):
+    """Internal helper (not a tool): location name -> (lat, lon, resolved_name)."""
+    geo = requests.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": location, "format": "json", "limit": 1},
+        headers=HEADERS, timeout=15,
+    ).json()
+    if not geo:
+        return None
+    return float(geo[0]["lat"]), float(geo[0]["lon"]), geo[0].get("display_name", location)
+
+
+def _overpass_raw(lat, lon, tag, radius=3000, limit=6):
+    """Internal helper (not a tool): raw named OSM elements matching `tag` near (lat, lon)."""
+    query = f'[out:json][timeout:25];(node{tag}(around:{radius},{lat},{lon});); out {limit * 2};'
+    elements = requests.post(
+        "https://overpass-api.de/api/interpreter",
+        data={"data": query}, headers=HEADERS, timeout=15,
+    ).json().get("elements", [])
+    return [e for e in elements if e.get("tags", {}).get("name")][:limit]
+
+
+def build_itinerary(location: str, num_days: int, total_budget: float = None, num_travelers: int = 1) -> str:
+    """Build a day-wise travel itinerary for a location, combining nearby attractions
+    and a restaurant suggestion per day. Use this whenever the user asks for an
+    itinerary, a trip plan, or a document/PDF/DOCX they can download - this tool
+    prepares the file for the real download buttons that appear below the chat.
+    total_budget is optional; include it if the user mentioned one."""
+    try:
+        geo = _geocode(location)
+        if not geo:
+            return f"Could not find a location matching '{location}'."
+        lat, lon, resolved = geo
+
+        attractions = _overpass_raw(lat, lon, '["tourism"]', limit=max(num_days * 2, 6))
+        restaurants = _overpass_raw(lat, lon, '["amenity"~"restaurant|cafe"]', limit=max(num_days, 3))
+
+        if not attractions:
+            return f"Not enough place data found near {resolved} to build an itinerary."
+
+        days = []
+        for d in range(num_days):
+            day_attractions = attractions[d * 2:(d * 2) + 2] or attractions[:2]
+            day_restaurant = restaurants[d % len(restaurants)] if restaurants else None
+            days.append({
+                "day": d + 1,
+                "attractions": [a["tags"]["name"] for a in day_attractions],
+                "restaurant": day_restaurant["tags"]["name"] if day_restaurant else None,
+            })
+
+        budget_text = plan_daily_budget(total_budget, num_days, num_travelers) if total_budget else None
+
+        itinerary = {
+            "location": resolved,
+            "num_days": num_days,
+            "hotel": None,
+            "days": days,
+            "budget_text": budget_text,
+            "generated": datetime.now().strftime("%d %b %Y"),
+        }
+        st.session_state["last_itinerary"] = itinerary
+
+        lines = [f"Itinerary for {resolved} ({num_days} day(s)) is ready:"]
+        for day in days:
+            lines.append(f"\nDay {day['day']}:")
+            lines += [f"  - Visit {a}" for a in day["attractions"]]
+            if day["restaurant"]:
+                lines.append(f"  - Eat at {day['restaurant']}")
+        if budget_text:
+            lines.append(f"\n{budget_text}")
+        lines.append(
+            "\n(The DOCX and PDF download buttons for this itinerary have appeared "
+            "below the chat - do not try to generate a download link yourself.)"
+        )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Could not build the itinerary: {e}"
+
+
 # =========================================================
 # DOCUMENT GENERATION (for the download buttons)
 # =========================================================
@@ -292,7 +371,8 @@ with st.sidebar:
         "**Try asking:**\n"
         "- Find attractions near Jaipur, India\n"
         "- Suggest restaurants near Amer Fort\n"
-        "- I have $300 for 3 days, 2 travelers — plan my budget"
+        "- I have $300 for 3 days, 2 travelers — plan my budget\n"
+        "- Plan a 3-day Jaipur itinerary I can download"
     )
     if st.button("🔄 Reset conversation"):
         for key in ("agent", "key", "messages", "chat_history"):
@@ -303,13 +383,31 @@ if not groq_api_key:
     st.info("👈 Enter your free Groq API key in the sidebar to start chatting.")
     st.stop()
 
+SYSTEM_PROMPT = (
+    "You are Wanderly, a friendly local travel guide chatbot. Use your tools to find "
+    "real attractions and restaurants, plan budgets, and build itineraries - never "
+    "invent place names, prices, or dates; only report what a tool actually returns.\n\n"
+    "If the user asks for an itinerary, a trip plan, or anything they can download "
+    "as a document/PDF/DOCX, you MUST call the build_itinerary tool rather than "
+    "answering directly. Real 'Download as DOCX' and 'Download as PDF' buttons "
+    "appear below the chat automatically once that tool runs - never write out an "
+    "HTML <a href>, a data: URI, or any raw markup yourself to fake a download link; "
+    "you cannot create real files by typing text, so just tell the user in plain "
+    "words that their file is ready below the chat.\n\n"
+    "Reply in the same language and style the user writes in: if they write in "
+    "Hinglish (mixed Hindi-English in Roman script), reply in Hinglish too; if they "
+    "write in plain English, reply in English; if they write in Hindi, reply in Hindi. "
+    "Keep answers concise and use bullet points for lists of places."
+)
+
 # Build the model + agent once per key (same create_agent pattern as the
 # reference files: model + tools -> agent)
 if "agent" not in st.session_state or st.session_state.get("key") != groq_api_key:
     groq_llm = ChatGroq(model=MODEL_NAME, api_key=groq_api_key)
     st.session_state.agent = create_agent(
         model=groq_llm,
-        tools=[find_nearby_attractions, find_nearby_restaurants, plan_daily_budget],
+        tools=[find_nearby_attractions, find_nearby_restaurants, plan_daily_budget, build_itinerary],
+        system_prompt=SYSTEM_PROMPT,
     )
     st.session_state.key = groq_api_key
 
