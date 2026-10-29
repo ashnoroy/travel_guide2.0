@@ -361,31 +361,39 @@ def itinerary_to_docx(itinerary: dict) -> bytes:
     return buf.getvalue()
  
  
+def _mc(pdf, h, text):
+    """multi_cell that always restarts at the left margin. Newer fpdf2 leaves
+    the cursor at the right edge after multi_cell, which made the next full-width
+    cell fail with 'Not enough horizontal space to render a single character'."""
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, h, text, new_x="LMARGIN", new_y="NEXT")
+
+
 def itinerary_to_pdf(itinerary: dict) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.multi_cell(0, 10, f"Travel Itinerary - {itinerary['location']}")
+    _mc(pdf, 10, f"Travel Itinerary - {itinerary['location']}")
     pdf.set_font("Helvetica", "", 11)
-    pdf.multi_cell(0, 8, f"Generated on {itinerary['generated']} | {itinerary['num_days']} day(s)")
+    _mc(pdf, 8, f"Generated on {itinerary['generated']} | {itinerary['num_days']} day(s)")
     if itinerary.get("hotel"):
-        pdf.multi_cell(0, 8, f"Suggested stay: {itinerary['hotel']}")
+        _mc(pdf, 8, f"Suggested stay: {itinerary['hotel']}")
     for day in itinerary["days"]:
         pdf.ln(3)
         pdf.set_font("Helvetica", "B", 13)
-        pdf.multi_cell(0, 8, f"Day {day['day']}")
+        _mc(pdf, 8, f"Day {day['day']}")
         pdf.set_font("Helvetica", "", 11)
         for a in day["attractions"]:
-            pdf.multi_cell(0, 7, f"- Visit {a}")
+            _mc(pdf, 7, f"- Visit {a}")
         if day["restaurant"]:
-            pdf.multi_cell(0, 7, f"- Eat at {day['restaurant']}")
+            _mc(pdf, 7, f"- Eat at {day['restaurant']}")
     if itinerary.get("budget_text"):
         pdf.ln(3)
         pdf.set_font("Helvetica", "B", 13)
-        pdf.multi_cell(0, 8, "Budget Plan")
+        _mc(pdf, 8, "Budget Plan")
         pdf.set_font("Helvetica", "", 11)
-        pdf.multi_cell(0, 7, itinerary["budget_text"])
+        _mc(pdf, 7, itinerary["budget_text"])
     return bytes(pdf.output())
 
 
@@ -444,9 +452,9 @@ def reply_to_pdf(text: str) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.multi_cell(0, 10, "Wanderly - Travel Guide")
+    _mc(pdf, 10, "Wanderly - Travel Guide")
     pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 7, f"Generated on {datetime.now().strftime('%d %b %Y')}")
+    _mc(pdf, 7, f"Generated on {datetime.now().strftime('%d %b %Y')}")
     pdf.ln(2)
     for kind, line in _clean_markdown(text):
         line = latin(line).strip()
@@ -455,13 +463,13 @@ def reply_to_pdf(text: str) -> bytes:
         if kind == "h":
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 13)
-            pdf.multi_cell(0, 8, line)
+            _mc(pdf, 8, line)
         elif kind == "b":
             pdf.set_font("Helvetica", "", 11)
-            pdf.multi_cell(0, 7, "- " + line)
+            _mc(pdf, 7, "- " + line)
         else:
             pdf.set_font("Helvetica", "", 11)
-            pdf.multi_cell(0, 7, line)
+            _mc(pdf, 7, line)
     return bytes(pdf.output())
 
 
