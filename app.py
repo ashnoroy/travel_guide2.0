@@ -11,6 +11,9 @@
 import base64
 from pathlib import Path
 import io
+import json
+import time
+import contextvars
 from datetime import datetime
 from urllib.parse import quote
 
@@ -23,8 +26,11 @@ from langchain_groq import ChatGroq
 
 import auth
 
-HEADERS = {"User-Agent": "wanderly-travel-chatbot/1.0"}
+HEADERS = {"User-Agent": "wanderly-travel-chatbot/1.0 (+https://github.com/ashnoroy/travel_guide2.0)"}
 MODEL_NAME = "openai/gpt-oss-120b"
+
+# Per-turn holder the build_itinerary tool writes into (see the tool below).
+_ITINERARY_HOLDER = contextvars.ContextVar("wanderly_itinerary_holder", default=None)
 
 auth.init_db()
 
@@ -41,22 +47,96 @@ GOOGLE_CONFIGURED = "auth" in st.secrets
 # reference files (temp_tool, search_latest_info, etc.)
 # =========================================================
 
+# The free public OpenStreetMap servers are shared and often busy or
+# rate-limited (especially from cloud hosts), so every call below retries
+# and falls back to mirror servers before giving up.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _geocode_raw(location):
+    """Turn a place name into [{'lat','lon','display_name'}].
+
+    Tries Nominatim first, then Photon (another free OpenStreetMap-based
+    geocoder that tends to accept requests from cloud hosts). Returns an
+    empty list only when a service answered and found nothing."""
+    errors = []
+    answered_empty = False
+
+    for attempt in range(2):
+        try:
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": location, "format": "json", "limit": 1},
+                headers=HEADERS, timeout=20,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data:
+                    return data
+                answered_empty = True
+                break
+            errors.append(f"Nominatim HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"Nominatim {type(e).__name__}")
+        time.sleep(1.5)
+
+    try:
+        r = requests.get(
+            "https://photon.komoot.io/api/",
+            params={"q": location, "limit": 1},
+            headers=HEADERS, timeout=20,
+        )
+        if r.status_code == 200:
+            features = r.json().get("features", [])
+            if features:
+                lon, lat = features[0]["geometry"]["coordinates"]
+                props = features[0].get("properties", {})
+                name = ", ".join(str(p) for p in (props.get("name"), props.get("state"), props.get("country")) if p)
+                return [{"lat": str(lat), "lon": str(lon), "display_name": name or location}]
+            answered_empty = True
+        else:
+            errors.append(f"Photon HTTP {r.status_code}")
+    except Exception as e:
+        errors.append(f"Photon {type(e).__name__}")
+
+    if answered_empty:
+        return []
+    print(f"[wanderly] geocoding failed for {location!r}: {errors}", flush=True)
+    raise RuntimeError(f"location lookup failed ({'; '.join(errors)})")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _overpass_query(query):
+    """Run an Overpass query, trying each mirror twice. Returns the elements list."""
+    last = "no response"
+    for url in OVERPASS_URLS:
+        for attempt in range(2):
+            try:
+                r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=30)
+                if r.status_code == 200:
+                    return r.json().get("elements", [])
+                last = f"HTTP {r.status_code} from {url}"
+            except Exception as e:
+                last = f"{url}: {e}"
+            time.sleep(1)
+    print(f"[wanderly] Overpass failed on every server: {last}", flush=True)
+    raise RuntimeError(f"places search failed ({last})")
+
+
 def search_places(location, tag, radius=3000, limit=5):
     try:
-        geo = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": location, "format": "json", "limit": 1},
-            headers=HEADERS, timeout=15,
-        ).json()
+        geo = _geocode_raw(location)
         if not geo:
             return f"Could not find a location matching '{location}'."
         lat, lon = geo[0]["lat"], geo[0]["lon"]
 
-        query = f'[out:json][timeout:25];(node{tag}(around:{radius},{lat},{lon});); out {limit};'
-        elements = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": query}, headers=HEADERS, timeout=15,
-        ).json().get("elements", [])
+        query = f'[out:json][timeout:25];(node{tag}["name"](around:{radius},{lat},{lon});); out {limit * 2};'
+        elements = _overpass_query(query)
 
         named = [e for e in elements if e.get("tags", {}).get("name")][:limit]
         if not named:
@@ -105,11 +185,7 @@ def plan_daily_budget(total_budget: float, num_days: int, num_travelers: int = 1
 
 def _geocode(location):
     """Internal helper (not a tool): location name -> (lat, lon, resolved_name)."""
-    geo = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": location, "format": "json", "limit": 1},
-        headers=HEADERS, timeout=15,
-    ).json()
+    geo = _geocode_raw(location)
     if not geo:
         return None
     return float(geo[0]["lat"]), float(geo[0]["lon"]), geo[0].get("display_name", location)
@@ -117,12 +193,38 @@ def _geocode(location):
 
 def _overpass_raw(lat, lon, tag, radius=3000, limit=6):
     """Internal helper (not a tool): raw named OSM elements matching `tag` near (lat, lon)."""
-    query = f'[out:json][timeout:25];(node{tag}(around:{radius},{lat},{lon});); out {limit * 2};'
-    elements = requests.post(
-        "https://overpass-api.de/api/interpreter",
-        data={"data": query}, headers=HEADERS, timeout=15,
-    ).json().get("elements", [])
+    query = f'[out:json][timeout:25];(node{tag}["name"](around:{radius},{lat},{lon});); out {limit * 2};'
+    elements = _overpass_query(query)
     return [e for e in elements if e.get("tags", {}).get("name")][:limit]
+
+
+_FALLBACK_LLM = {}  # filled in once the Groq model is created (see bottom of file)
+
+
+def _llm_places(location, num_days):
+    """Fallback when the OpenStreetMap servers can't be reached: ask the Groq
+    model itself for well-known attractions and restaurants. Returns
+    (attractions, restaurants) as lists of names, or raises if that fails too."""
+    llm = _FALLBACK_LLM.get("llm")
+    if llm is None:
+        raise RuntimeError("model not ready")
+    n_attr = max(num_days * 2, 6)
+    n_rest = max(num_days, 3)
+    prompt = (
+        f"List {n_attr} famous real tourist attractions and {n_rest} well-known real "
+        f"restaurants or cafes in or near {location}. Reply with ONLY a JSON object, "
+        'no other text, in this exact shape: {"attractions": ["..."], "restaurants": ["..."]}'
+    )
+    text = llm.invoke(prompt).content
+    if isinstance(text, list):
+        text = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in text)
+    start, end = text.find("{"), text.rfind("}")
+    data = json.loads(text[start:end + 1])
+    attractions = [str(a).strip() for a in data.get("attractions", []) if str(a).strip()]
+    restaurants = [str(r).strip() for r in data.get("restaurants", []) if str(r).strip()]
+    if not attractions:
+        raise RuntimeError("model returned no attractions")
+    return attractions, restaurants
 
 
 def build_itinerary(location: str, num_days: int, total_budget: float = None, num_travelers: int = 1) -> str:
@@ -132,16 +234,29 @@ def build_itinerary(location: str, num_days: int, total_budget: float = None, nu
     prepares the file for the real download buttons that appear below the chat.
     total_budget is optional; include it if the user mentioned one."""
     try:
-        geo = _geocode(location)
-        if not geo:
-            return f"Could not find a location matching '{location}'."
-        lat, lon, resolved = geo
+        used_fallback = False
+        try:
+            geo = _geocode(location)
+            if not geo:
+                return f"Could not find a location matching '{location}'."
+            lat, lon, resolved = geo
 
-        attractions = _overpass_raw(lat, lon, '["tourism"]', limit=max(num_days * 2, 6))
-        restaurants = _overpass_raw(lat, lon, '["amenity"~"restaurant|cafe"]', limit=max(num_days, 3))
-
-        if not attractions:
-            return f"Not enough place data found near {resolved} to build an itinerary."
+            attractions = _overpass_raw(lat, lon, '["tourism"]', limit=max(num_days * 2, 6))
+            restaurants = _overpass_raw(lat, lon, '["amenity"~"restaurant|cafe"]', limit=max(num_days, 3))
+            attractions = [a["tags"]["name"] for a in attractions]
+            restaurants = [r["tags"]["name"] for r in restaurants]
+            if not attractions:
+                raise RuntimeError("no attractions in map data")
+        except Exception as map_err:
+            # Map servers unreachable/blocked/empty -> don't fail, use the model's
+            # own knowledge of well-known places instead.
+            print(f"[wanderly] map data failed ({map_err}); using model fallback", flush=True)
+            try:
+                attractions, restaurants = _llm_places(location, num_days)
+            except Exception as llm_err:
+                return f"Could not build the itinerary: map data failed ({map_err}); fallback failed ({llm_err})"
+            resolved = location
+            used_fallback = True
 
         days = []
         for d in range(num_days):
@@ -149,8 +264,8 @@ def build_itinerary(location: str, num_days: int, total_budget: float = None, nu
             day_restaurant = restaurants[d % len(restaurants)] if restaurants else None
             days.append({
                 "day": d + 1,
-                "attractions": [a["tags"]["name"] for a in day_attractions],
-                "restaurant": day_restaurant["tags"]["name"] if day_restaurant else None,
+                "attractions": day_attractions,
+                "restaurant": day_restaurant,
             })
 
         budget_text = plan_daily_budget(total_budget, num_days, num_travelers) if total_budget else None
@@ -162,8 +277,19 @@ def build_itinerary(location: str, num_days: int, total_budget: float = None, nu
             "days": days,
             "budget_text": budget_text,
             "generated": datetime.now().strftime("%d %b %Y"),
+            "source": "AI suggestions (live map data was unavailable)" if used_fallback else "OpenStreetMap",
         }
-        st.session_state["last_itinerary"] = itinerary
+        # The agent may run tools on a worker thread, where Streamlit's
+        # session_state isn't reliably available. So hand the itinerary back
+        # through a holder the main script created for this turn, and keep
+        # the session_state write as a fallback.
+        holder = _ITINERARY_HOLDER.get(None)
+        if holder is not None:
+            holder["itinerary"] = itinerary
+        try:
+            st.session_state["last_itinerary"] = itinerary
+        except Exception:
+            pass
 
         lines = [f"Itinerary for {resolved} ({num_days} day(s)) is ready:"]
         for day in days:
@@ -173,6 +299,11 @@ def build_itinerary(location: str, num_days: int, total_budget: float = None, nu
                 lines.append(f"  - Eat at {day['restaurant']}")
         if budget_text:
             lines.append(f"\n{budget_text}")
+        if used_fallback:
+            lines.append(
+                "\nNote: live map data was unavailable, so these are well-known places "
+                "suggested by the AI - tell the user to double-check opening hours."
+            )
         lines.append(
             "\n(The DOCX and PDF download buttons for this itinerary have appeared "
             "below the chat - do not try to generate a download link yourself.)"
@@ -186,6 +317,30 @@ def build_itinerary(location: str, num_days: int, total_budget: float = None, nu
 # DOCUMENT GENERATION (for the download buttons)
 # =========================================================
  
+def check_map_services():
+    """Ping each free map service once and report (name, ok, detail). Used by
+    the sidebar's 'Test map connection' button to show the real cause when
+    place searches fail."""
+    results = []
+    probes = [
+        ("Nominatim (geocoding)", "get", "https://nominatim.openstreetmap.org/search",
+         {"params": {"q": "Jaipur", "format": "json", "limit": 1}}),
+        ("Photon (geocoding backup)", "get", "https://photon.komoot.io/api/",
+         {"params": {"q": "Jaipur", "limit": 1}}),
+    ] + [
+        (f"Overpass ({u.split('/')[2]})", "post", u,
+         {"data": {"data": '[out:json][timeout:10];node["tourism"="attraction"](around:500,26.9124,75.7873);out 1;'}})
+        for u in OVERPASS_URLS
+    ]
+    for name, method, url, kwargs in probes:
+        try:
+            r = getattr(requests, method)(url, headers=HEADERS, timeout=20, **kwargs)
+            results.append((name, r.status_code == 200, f"HTTP {r.status_code}"))
+        except Exception as e:
+            results.append((name, False, f"{type(e).__name__}: {e}"))
+    return results
+
+
 def itinerary_to_docx(itinerary: dict) -> bytes:
     doc = Document()
     doc.add_heading(f"Travel Itinerary \u2013 {itinerary['location']}", level=1)
@@ -374,6 +529,10 @@ with st.sidebar:
         "- I have $300 for 3 days, 2 travelers — plan my budget\n"
         "- Plan a 3-day Jaipur itinerary I can download"
     )
+    if st.button("🛠 Test map connection"):
+        with st.spinner("Checking the free map services..."):
+            for name, ok, detail in check_map_services():
+                (st.success if ok else st.error)(f"{name}: {detail}")
     if st.button("🔄 Reset conversation"):
         for key in ("agent", "key", "messages", "chat_history"):
             st.session_state.pop(key, None)
@@ -404,6 +563,7 @@ SYSTEM_PROMPT = (
 # reference files: model + tools -> agent)
 if "agent" not in st.session_state or st.session_state.get("key") != groq_api_key:
     groq_llm = ChatGroq(model=MODEL_NAME, api_key=groq_api_key)
+    _FALLBACK_LLM["llm"] = groq_llm
     st.session_state.agent = create_agent(
         model=groq_llm,
         tools=[find_nearby_attractions, find_nearby_restaurants, plan_daily_budget, build_itinerary],
@@ -436,7 +596,11 @@ if user_input:
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
+                holder = {}
+                _ITINERARY_HOLDER.set(holder)
                 response = st.session_state.agent.invoke({"messages": pending_history})
+                if holder.get("itinerary"):
+                    st.session_state["last_itinerary"] = holder["itinerary"]
                 content = response["messages"][-1].content
                 # Groq/gpt-oss returns plain string content. Some other
                 # providers (e.g. Gemini) return a list of content blocks
