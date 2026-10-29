@@ -390,6 +390,82 @@ def itinerary_to_pdf(itinerary: dict) -> bytes:
 
 
 
+def _clean_markdown(text: str) -> list:
+    """Chat markdown -> list of (kind, text) lines: kind is 'h' (heading),
+    'b' (bullet) or 'p' (paragraph). Strips **bold**, #, tables and emojis."""
+    import re
+    out = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or re.fullmatch(r"[-*_|:\s]{3,}", line):
+            continue
+        kind = "p"
+        m = re.match(r"^#{1,6}\s+(.*)", line)
+        if m:
+            kind, line = "h", m.group(1)
+        elif re.match(r"^[-*\u2022]\s+", line):
+            kind, line = "b", re.sub(r"^[-*\u2022]\s+", "", line)
+        if line.startswith("|"):
+            line = "  ".join(c.strip() for c in line.strip("|").split("|"))
+        line = re.sub(r"[*_`]{1,3}", "", line)
+        out.append((kind, line.strip()))
+    return out
+
+
+def reply_to_docx(text: str) -> bytes:
+    doc = Document()
+    doc.add_heading("Wanderly - Travel Guide", level=1)
+    doc.add_paragraph(f"Generated on {datetime.now().strftime('%d %b %Y')}")
+    for kind, line in _clean_markdown(text):
+        if kind == "h":
+            doc.add_heading(line, level=2)
+        elif kind == "b":
+            doc.add_paragraph(line, style="List Bullet")
+        else:
+            doc.add_paragraph(line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def reply_to_pdf(text: str) -> bytes:
+    # The built-in PDF fonts only support Latin-1, so swap common symbols
+    # and drop emojis/other characters they can't draw.
+    swaps = {"\u20b9": "Rs ", "\u2248": "~", "\u2192": "->", "\u2013": "-",
+             "\u2014": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"',
+             "\u201d": '"', "\u2022": "-", "\u2026": "..."}
+
+    def latin(t):
+        for k, v in swaps.items():
+            t = t.replace(k, v)
+        return t.encode("latin-1", "ignore").decode("latin-1")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(0, 10, "Wanderly - Travel Guide")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 7, f"Generated on {datetime.now().strftime('%d %b %Y')}")
+    pdf.ln(2)
+    for kind, line in _clean_markdown(text):
+        line = latin(line).strip()
+        if not line:
+            continue
+        if kind == "h":
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.multi_cell(0, 8, line)
+        elif kind == "b":
+            pdf.set_font("Helvetica", "", 11)
+            pdf.multi_cell(0, 7, "- " + line)
+        else:
+            pdf.set_font("Helvetica", "", 11)
+            pdf.multi_cell(0, 7, line)
+    return bytes(pdf.output())
+
+
+
 # =========================================================
 # STREAMLIT FRONTEND
 # =========================================================
@@ -623,20 +699,44 @@ if user_input:
 
     st.session_state.messages.append(("assistant", reply))
 
-# --- Download section: appears once an itinerary has been built ---
-if st.session_state.get("last_itinerary"):
+# --- Download section ---
+# 1) Structured itinerary (when the build_itinerary tool ran)
+# 2) Always: the latest assistant answer as DOCX/PDF, so a download is
+#    available even if the model answered without calling the tool.
+_last_reply = next((t for r, t in reversed(st.session_state.messages) if r == "assistant"), None)
+_last_ok = _last_reply and not _last_reply.startswith("Something went wrong")
+
+if st.session_state.get("last_itinerary") or _last_ok:
     st.markdown("---")
-    st.subheader("📥 Download your itinerary")
+    st.subheader("\U0001F4E5 Downloads")
+
+if st.session_state.get("last_itinerary"):
     itinerary = st.session_state["last_itinerary"]
+    st.caption("Itinerary file")
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
-            "Download as DOCX", data=itinerary_to_docx(itinerary),
-            file_name="itinerary.docx",
+            "Download itinerary as DOCX", data=itinerary_to_docx(itinerary),
+            file_name="itinerary.docx", key="dl_it_docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
     with col2:
         st.download_button(
-            "Download as PDF", data=itinerary_to_pdf(itinerary),
-            file_name="itinerary.pdf", mime="application/pdf",
+            "Download itinerary as PDF", data=itinerary_to_pdf(itinerary),
+            file_name="itinerary.pdf", mime="application/pdf", key="dl_it_pdf",
+        )
+
+if _last_ok:
+    st.caption("Latest answer from Wanderly")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "Download last answer as DOCX", data=reply_to_docx(_last_reply),
+            file_name="wanderly_answer.docx", key="dl_reply_docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    with c2:
+        st.download_button(
+            "Download last answer as PDF", data=reply_to_pdf(_last_reply),
+            file_name="wanderly_answer.pdf", mime="application/pdf", key="dl_reply_pdf",
         )
